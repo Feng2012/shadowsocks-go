@@ -2,8 +2,6 @@ package shadowsocks
 
 import (
 	"bytes"
-	"code.google.com/p/go.crypto/blowfish"
-	"code.google.com/p/go.crypto/cast5"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/des"
@@ -13,6 +11,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+
+	"golang.org/x/crypto/blowfish"
+	"golang.org/x/crypto/cast5"
 )
 
 var errEmptyPassword = errors.New("empty key")
