@@ -8,13 +8,31 @@ import (
 	"strconv"
 )
 
+const (
+	OneTimeAuthMask byte = 0x10
+	AddrMask        byte = 0xf
+)
+
 type Conn struct {
 	net.Conn
 	*Cipher
+	readBuf  []byte
+	writeBuf []byte
+	chunkId  uint32
 }
 
-func NewConn(cn net.Conn, cipher *Cipher) *Conn {
-	return &Conn{cn, cipher}
+func NewConn(c net.Conn, cipher *Cipher) *Conn {
+	return &Conn{
+		Conn:     c,
+		Cipher:   cipher,
+		readBuf:  leakyBuf.Get(),
+		writeBuf: leakyBuf.Get()}
+}
+
+func (c *Conn) Close() error {
+	leakyBuf.Put(c.readBuf)
+	leakyBuf.Put(c.writeBuf)
+	return c.Conn.Close()
 }
 
 func RawAddr(addr string) (buf []byte, err error) {
@@ -46,7 +64,18 @@ func DialWithRawAddr(rawaddr []byte, server string, cipher *Cipher) (c *Conn, er
 		return
 	}
 	c = NewConn(conn, cipher)
-	if _, err = c.Write(rawaddr); err != nil {
+	if cipher.ota {
+		if c.enc == nil {
+			if _, err = c.initEncrypt(); err != nil {
+				return
+			}
+		}
+		// since we have initEncrypt, we must send iv manually
+		conn.Write(cipher.iv)
+		rawaddr[0] |= OneTimeAuthMask
+		rawaddr = otaConnectAuth(cipher.iv, cipher.key, rawaddr)
+	}
+	if _, err = c.write(rawaddr); err != nil {
 		c.Close()
 		return nil, err
 	}
@@ -62,6 +91,28 @@ func Dial(addr, server string, cipher *Cipher) (c *Conn, err error) {
 	return DialWithRawAddr(ra, server, cipher)
 }
 
+func (c *Conn) GetIv() (iv []byte) {
+	iv = make([]byte, len(c.iv))
+	copy(iv, c.iv)
+	return
+}
+
+func (c *Conn) GetKey() (key []byte) {
+	key = make([]byte, len(c.key))
+	copy(key, c.key)
+	return
+}
+
+func (c *Conn) IsOta() bool {
+	return c.ota
+}
+
+func (c *Conn) GetAndIncrChunkId() (chunkId uint32) {
+	chunkId = c.chunkId
+	c.chunkId += 1
+	return
+}
+
 func (c *Conn) Read(b []byte) (n int, err error) {
 	if c.dec == nil {
 		iv := make([]byte, c.info.ivLen)
@@ -71,8 +122,18 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 		if err = c.initDecrypt(iv); err != nil {
 			return
 		}
+		if len(c.iv) == 0 {
+			c.iv = iv
+		}
 	}
-	cipherData := make([]byte, len(b))
+
+	cipherData := c.readBuf
+	if len(b) > len(cipherData) {
+		cipherData = make([]byte, len(b))
+	} else {
+		cipherData = cipherData[:len(b)]
+	}
+
 	n, err = c.Conn.Read(cipherData)
 	if n > 0 {
 		c.decrypt(b[0:n], cipherData[0:n])
@@ -81,23 +142,45 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 }
 
 func (c *Conn) Write(b []byte) (n int, err error) {
-	var cipherData []byte
-	dataStart := 0
+	nn := len(b)
+	if c.ota {
+		chunkId := c.GetAndIncrChunkId()
+		b = otaReqChunkAuth(c.iv, chunkId, b)
+	}
+	headerLen := len(b) - nn
+
+	n, err = c.write(b)
+	// Make sure <= 0 <= len(b), where b is the slice passed in.
+	if n >= headerLen {
+		n -= headerLen
+	}
+	return
+}
+
+func (c *Conn) write(b []byte) (n int, err error) {
+	var iv []byte
 	if c.enc == nil {
-		var iv []byte
 		iv, err = c.initEncrypt()
 		if err != nil {
 			return
 		}
+	}
+
+	cipherData := c.writeBuf
+	dataSize := len(b) + len(iv)
+	if dataSize > len(cipherData) {
+		cipherData = make([]byte, dataSize)
+	} else {
+		cipherData = cipherData[:dataSize]
+	}
+
+	if iv != nil {
 		// Put initialization vector in buffer, do a single write to send both
 		// iv and data.
-		cipherData = make([]byte, len(b)+len(iv))
 		copy(cipherData, iv)
-		dataStart = len(iv)
-	} else {
-		cipherData = make([]byte, len(b))
 	}
-	c.encrypt(cipherData[dataStart:], b)
+
+	c.encrypt(cipherData[len(iv):], b)
 	n, err = c.Conn.Write(cipherData)
 	return
 }

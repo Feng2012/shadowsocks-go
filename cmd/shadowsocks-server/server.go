@@ -1,11 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
-	ss "github.com/shadowsocks/shadowsocks-go/shadowsocks"
 	"io"
 	"log"
 	"net"
@@ -13,8 +13,11 @@ import (
 	"os/signal"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
+
+	ss "github.com/dearplain/shadowsocks-go/shadowsocks"
 )
 
 import (
@@ -26,82 +29,94 @@ import (
 	"encoding/json"
 	
     "math/rand"
-	
 	"io/ioutil"
 	"time"
-	
 	"html/template"
 )
 
 
 var debug ss.DebugLog
 
-const dnsGoroutineNum = 64
+const (
+	idType  = 0 // address type index
+	idIP0   = 1 // ip addres start index
+	idDmLen = 1 // domain address length index
+	idDm0   = 2 // domain address start index
 
-func getRequest(conn *ss.Conn) (host string, extra []byte, err error) {
-	const (
-		idType  = 0 // address type index
-		idIP0   = 1 // ip addres start index
-		idDmLen = 1 // domain address length index
-		idDm0   = 2 // domain address start index
+	typeIPv4 = 1 // type is ipv4 address
+	typeDm   = 3 // type is domain address
+	typeIPv6 = 4 // type is ipv6 address
 
-		typeIPv4 = 1 // type is ipv4 address
-		typeDm   = 3 // type is domain address
-		typeIPv6 = 4 // type is ipv6 address
+	lenIPv4     = net.IPv4len + 2 // ipv4 + 2port
+	lenIPv6     = net.IPv6len + 2 // ipv6 + 2port
+	lenDmBase   = 2               // 1addrLen + 2port, plus addrLen
+	lenHmacSha1 = 10
+)
 
-		lenIPv4   = 1 + net.IPv4len + 2 // 1addrType + ipv4 + 2port
-		lenIPv6   = 1 + net.IPv6len + 2 // 1addrType + ipv6 + 2port
-		lenDmBase = 1 + 1 + 2           // 1addrType + 1addrLen + 2port, plus addrLen
-	)
+var debug ss.DebugLog
+var udp bool
+
+func getRequest(conn *ss.Conn, auth bool) (host string, ota bool, err error) {
+	ss.SetReadTimeout(conn)
 
 	// buf size should at least have the same size with the largest possible
 	// request size (when addrType is 3, domain name has at most 256 bytes)
-	// 1(addrType) + 1(lenByte) + 256(max length address) + 2(port)
-	buf := make([]byte, 260)
-	var n int
+	// 1(addrType) + 1(lenByte) + 255(max length address) + 2(port) + 10(hmac-sha1)
+	buf := make([]byte, 269)
 	// read till we get possible domain length field
-	ss.SetReadTimeout(conn)
-	if n, err = io.ReadAtLeast(conn, buf, idDmLen+1); err != nil {
+	if _, err = io.ReadFull(conn, buf[:idType+1]); err != nil {
 		return
 	}
 
-	reqLen := -1
-	switch buf[idType] {
+	var reqStart, reqEnd int
+	addrType := buf[idType]
+	switch addrType & ss.AddrMask {
 	case typeIPv4:
-		reqLen = lenIPv4
+		reqStart, reqEnd = idIP0, idIP0+lenIPv4
 	case typeIPv6:
-		reqLen = lenIPv6
+		reqStart, reqEnd = idIP0, idIP0+lenIPv6
 	case typeDm:
-		reqLen = int(buf[idDmLen]) + lenDmBase
-	default:
-		err = fmt.Errorf("addr type %d not supported", buf[idType])
-		return
-	}
-
-	if n < reqLen { // rare case
-		ss.SetReadTimeout(conn)
-		if _, err = io.ReadFull(conn, buf[n:reqLen]); err != nil {
+		if _, err = io.ReadFull(conn, buf[idType+1:idDmLen+1]); err != nil {
 			return
 		}
-	} else if n > reqLen {
-		// it's possible to read more than just the request head
-		extra = buf[reqLen:n]
+		reqStart, reqEnd = idDm0, idDm0+int(buf[idDmLen])+lenDmBase
+	default:
+		err = fmt.Errorf("addr type %d not supported", addrType&ss.AddrMask)
+		return
+	}
+
+	if _, err = io.ReadFull(conn, buf[reqStart:reqEnd]); err != nil {
+		return
 	}
 
 	// Return string for typeIP is not most efficient, but browsers (Chrome,
 	// Safari, Firefox) all seems using typeDm exclusively. So this is not a
 	// big problem.
-	switch buf[idType] {
+	switch addrType & ss.AddrMask {
 	case typeIPv4:
 		host = net.IP(buf[idIP0 : idIP0+net.IPv4len]).String()
 	case typeIPv6:
 		host = net.IP(buf[idIP0 : idIP0+net.IPv6len]).String()
 	case typeDm:
-		host = string(buf[idDm0 : idDm0+buf[idDmLen]])
+		host = string(buf[idDm0 : idDm0+int(buf[idDmLen])])
 	}
 	// parse port
-	port := binary.BigEndian.Uint16(buf[reqLen-2 : reqLen])
+	port := binary.BigEndian.Uint16(buf[reqEnd-2 : reqEnd])
 	host = net.JoinHostPort(host, strconv.Itoa(int(port)))
+	// if specified one time auth enabled, we should verify this
+	if auth || addrType&ss.OneTimeAuthMask > 0 {
+		ota = true
+		if _, err = io.ReadFull(conn, buf[reqEnd:reqEnd+lenHmacSha1]); err != nil {
+			return
+		}
+		iv := conn.GetIv()
+		key := conn.GetKey()
+		actualHmacSha1Buf := ss.HmacSha1(append(iv, key...), buf[:reqEnd])
+		if !bytes.Equal(buf[reqEnd:reqEnd+lenHmacSha1], actualHmacSha1Buf) {
+			err = fmt.Errorf("verify one time auth failed, iv=%v key=%v data=%v", iv, key, buf[:reqEnd])
+			return
+		}
+	}
 	return
 }
 
@@ -110,7 +125,7 @@ const logCntDelta = 100
 var connCnt int
 var nextLogConnCnt int = logCntDelta
 
-func handleConnection(conn *ss.Conn) {
+func handleConnection(conn *ss.Conn, auth bool) {
 	var host string
 
 	connCnt++ // this maybe not accurate, but should be enough
@@ -138,9 +153,16 @@ func handleConnection(conn *ss.Conn) {
 		}
 	}()
 
-	host, extra, err := getRequest(conn)
+	host, ota, err := getRequest(conn, auth)
 	if err != nil {
 		log.Println("error getting request", conn.RemoteAddr(), conn.LocalAddr(), err)
+		closed = true
+		return
+	}
+	// ensure the host does not contain some illegal characters, NUL may panic on Win32
+	if strings.ContainsRune(host, 0x00) {
+		log.Println("invalid domain name.")
+		closed = true
 		return
 	}
 	debug.Println("connecting", host)
@@ -160,18 +182,18 @@ func handleConnection(conn *ss.Conn) {
 			remote.Close()
 		}
 	}()
-	// write extra bytes read from
-	if extra != nil {
-		// debug.Println("getRequest read extra data, writing to remote, len", len(extra))
-		if _, err = remote.Write(extra); err != nil {
-			debug.Println("write request extra error:", err)
-			return
-		}
-	}
 	if debug {
-		debug.Printf("piping %s<->%s", conn.RemoteAddr(), host)
+		debug.Printf("piping %s<->%s ota=%v connOta=%v", conn.RemoteAddr(), host, ota, conn.IsOta())
 	}
+<<<<<<< HEAD
 	go ss.PipeThenClose(conn, remote)
+=======
+	if ota {
+		go ss.PipeThenCloseOta(conn, remote)
+	} else {
+		go ss.PipeThenClose(conn, remote)
+	}
+>>>>>>> 5c6f652e323ffe46b8b417408cd519fc15a11e70
 	ss.PipeThenClose(remote, conn)
 	closed = true
 	return
@@ -182,14 +204,26 @@ type PortListener struct {
 	listener net.Listener
 }
 
+type UDPListener struct {
+	password string
+	listener *net.UDPConn
+}
+
 type PasswdManager struct {
 	sync.Mutex
 	portListener map[string]*PortListener
+	udpListener  map[string]*UDPListener
 }
 
 func (pm *PasswdManager) add(port, password string, listener net.Listener) {
 	pm.Lock()
 	pm.portListener[port] = &PortListener{password, listener}
+	pm.Unlock()
+}
+
+func (pm *PasswdManager) addUDP(port, password string, listener *net.UDPConn) {
+	pm.Lock()
+	pm.udpListener[port] = &UDPListener{password, listener}
 	pm.Unlock()
 }
 
@@ -200,14 +234,31 @@ func (pm *PasswdManager) get(port string) (pl *PortListener, ok bool) {
 	return
 }
 
+func (pm *PasswdManager) getUDP(port string) (pl *UDPListener, ok bool) {
+	pm.Lock()
+	pl, ok = pm.udpListener[port]
+	pm.Unlock()
+	return
+}
+
 func (pm *PasswdManager) del(port string) {
 	pl, ok := pm.get(port)
 	if !ok {
 		return
 	}
+	if udp {
+		upl, ok := pm.getUDP(port)
+		if !ok {
+			return
+		}
+		upl.listener.Close()
+	}
 	pl.listener.Close()
 	pm.Lock()
 	delete(pm.portListener, port)
+	if udp {
+		delete(pm.udpListener, port)
+	}
 	pm.Unlock()
 }
 
@@ -215,7 +266,7 @@ func (pm *PasswdManager) del(port string) {
 // port. A different approach would be directly change the password used by
 // that port, but that requires **sharing** password between the port listener
 // and password manager.
-func (pm *PasswdManager) updatePortPasswd(port, password string) {
+func (pm *PasswdManager) updatePortPasswd(port, password string, auth bool) {
 	pl, ok := pm.get(port)
 	if !ok {
 		log.Printf("new port %s added\n", port)
@@ -228,10 +279,15 @@ func (pm *PasswdManager) updatePortPasswd(port, password string) {
 	}
 	// run will add the new port listener to passwdManager.
 	// So there maybe concurrent access to passwdManager and we need lock to protect it.
-	go run(port, password)
+	go run(port, password, auth)
+	if udp {
+		pl, _ := pm.getUDP(port)
+		pl.listener.Close()
+		go runUDP(port, password, auth)
+	}
 }
 
-var passwdManager = PasswdManager{portListener: map[string]*PortListener{}}
+var passwdManager = PasswdManager{portListener: map[string]*PortListener{}, udpListener: map[string]*UDPListener{}}
 
 func updatePasswd() {
 	log.Println("updating password")
@@ -247,7 +303,7 @@ func updatePasswd() {
 		return
 	}
 	for port, passwd := range config.PortPassword {
-		passwdManager.updatePortPasswd(port, passwd)
+		passwdManager.updatePortPasswd(port, passwd, config.Auth)
 		if oldconfig.PortPassword != nil {
 			delete(oldconfig.PortPassword, port)
 		}
@@ -274,15 +330,19 @@ func waitSignal() {
 	}
 }
 
+<<<<<<< HEAD
 func run(port, password string) {
 	
 	var addr string
 	var lastTime int64
 	
+=======
+func run(port, password string, auth bool) {
+>>>>>>> 5c6f652e323ffe46b8b417408cd519fc15a11e70
 	ln, err := net.Listen("tcp", ":"+port)
 	if err != nil {
 		log.Printf("error listening port %v: %v\n", port, err)
-		return
+		os.Exit(1)
 	}
 	passwdManager.add(port, password, ln)
 	var cipher *ss.Cipher
@@ -314,7 +374,34 @@ func run(port, password string) {
 				continue
 			}
 		}
-		go handleConnection(ss.NewConn(conn, cipher.Copy()))
+		go handleConnection(ss.NewConn(conn, cipher.Copy()), auth)
+	}
+}
+
+func runUDP(port, password string, auth bool) {
+	var cipher *ss.Cipher
+	port_i, _ := strconv.Atoi(port)
+	log.Printf("listening udp port %v\n", port)
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{
+		IP:   net.IPv6zero,
+		Port: port_i,
+	})
+	passwdManager.addUDP(port, password, conn)
+	if err != nil {
+		log.Printf("error listening udp port %v: %v\n", port, err)
+		return
+	}
+	defer conn.Close()
+	cipher, err = ss.NewCipher(config.Method, password)
+	if err != nil {
+		log.Printf("Error generating cipher for udp port: %s %v\n", port, err)
+		conn.Close()
+	}
+	SecurePacketConn := ss.NewSecurePacketConn(conn, cipher.Copy(), auth)
+	for {
+		if err := ss.ReadAndHandleUDPReq(SecurePacketConn); err != nil {
+			debug.Println(err)
+		}
 	}
 }
 
@@ -353,11 +440,11 @@ func main() {
 	flag.StringVar(&configFile, "c", "config.json", "specify config file")
 	flag.StringVar(&cmdConfig.Password, "k", "", "password")
 	flag.IntVar(&cmdConfig.ServerPort, "p", 0, "server port")
-	flag.IntVar(&cmdConfig.Timeout, "t", 60, "connection timeout (in seconds)")
+	flag.IntVar(&cmdConfig.Timeout, "t", 300, "timeout in seconds")
 	flag.StringVar(&cmdConfig.Method, "m", "", "encryption method, default: aes-256-cfb")
 	flag.IntVar(&core, "core", 0, "maximum number of CPU cores to use, default is determinied by Go runtime")
 	flag.BoolVar((*bool)(&debug), "d", false, "print debug message")
-
+	flag.BoolVar(&udp, "u", false, "UDP Relay")
 	flag.Parse()
 
 	if printVer {
@@ -367,6 +454,11 @@ func main() {
 
 	ss.SetDebug(debug)
 
+	if strings.HasSuffix(cmdConfig.Method, "-auth") {
+		cmdConfig.Method = cmdConfig.Method[:len(cmdConfig.Method)-5]
+		cmdConfig.Auth = true
+	}
+
 	var err error
 	config, err = ss.ParseConfig(configFile)
 	if err != nil {
@@ -375,6 +467,7 @@ func main() {
 			os.Exit(1)
 		}
 		config = &cmdConfig
+		ss.UpdateConfig(config, config)
 	} else {
 		ss.UpdateConfig(config, &cmdConfig)
 	}
@@ -401,7 +494,10 @@ func main() {
 	
 	
 	for port, password := range config.PortPassword {
-		go run(port, password)
+		go run(port, password, config.Auth)
+		if udp {
+			go runUDP(port, password, config.Auth)
+		}
 	}
 	
 	go runWeb()

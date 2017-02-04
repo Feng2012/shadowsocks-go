@@ -200,6 +200,7 @@ func handShake(conn net.Conn) (err error) {
 	buf := make([]byte, 258)
 
 	var n int
+	ss.SetReadTimeout(conn)
 	// make sure we get the nmethod field
 	if n, err = io.ReadAtLeast(conn, buf, idNmethod+1); err != nil {
 		return
@@ -243,6 +244,7 @@ func getRequest(conn net.Conn) (rawaddr []byte, host string, err error) {
 	// refer to getRequest in server.go for why set buffer size to 263
 	buf := make([]byte, 263)
 	var n int
+	ss.SetReadTimeout(conn)
 	// read till we get possible domain length field
 	if n, err = io.ReadAtLeast(conn, buf, idDmLen+1); err != nil {
 		return
@@ -319,8 +321,12 @@ func parseServerConfig(config *ss.Config) {
 	}
 
 	if len(config.ServerPassword) == 0 {
+		method := config.Method
+		if config.Auth {
+			method += "-auth"
+		}
 		// only one encryption table
-		cipher, err := ss.NewCipher(config.Method, config.Password)
+		cipher, err := ss.NewCipher(method, config.Password)
 		if err != nil {
 			log.Fatal("Failed generating ciphers:", err)
 		}
@@ -357,14 +363,17 @@ func parseServerConfig(config *ss.Config) {
 			if !hasPort(server) {
 				log.Fatalf("no port for server %s\n", server)
 			}
-			cipher, ok := cipherCache[passwd]
+			// Using "|" as delimiter is safe here, since no encryption
+			// method contains it in the name.
+			cacheKey := encmethod + "|" + passwd
+			cipher, ok := cipherCache[cacheKey]
 			if !ok {
 				var err error
 				cipher, err = ss.NewCipher(encmethod, passwd)
 				if err != nil {
 					log.Fatal("Failed generating ciphers:", err)
 				}
-				cipherCache[passwd] = cipher
+				cipherCache[cacheKey] = cipher
 			}
 			servers.srvCipher[i] = &ServerCipher{server, cipher}
 			i++
@@ -506,8 +515,8 @@ func handleConnection(conn net.Conn) {
 		}
 	}
 
-	go ss.PipeThenClose(conn, remote, ss.NO_TIMEOUT)
-	ss.PipeThenClose(remote, conn, ss.NO_TIMEOUT)
+	go ss.PipeThenClose(conn, remote)
+	ss.PipeThenClose(remote, conn)
 	closed = true
 	debug.Println("closed connection to", addr)
 }
@@ -546,9 +555,11 @@ func main() {
 	flag.StringVar(&cmdLocal, "b", "", "local address, listen only to this address if specified")
 	flag.StringVar(&cmdConfig.Password, "k", "", "password")
 	flag.IntVar(&cmdConfig.ServerPort, "p", 0, "server port")
+	flag.IntVar(&cmdConfig.Timeout, "t", 300, "timeout in seconds")
 	flag.IntVar(&cmdConfig.LocalPort, "l", 0, "local socks5 proxy port")
 	flag.StringVar(&cmdConfig.Method, "m", "", "encryption method, default: aes-256-cfb")
 	flag.BoolVar((*bool)(&debug), "d", false, "print debug message")
+	flag.BoolVar(&cmdConfig.Auth, "A", false, "one time auth")
 
 	flag.Parse()
 
@@ -559,6 +570,11 @@ func main() {
 
 	cmdConfig.Server = cmdServer
 	ss.SetDebug(debug)
+
+	if strings.HasSuffix(cmdConfig.Method, "-auth") {
+		cmdConfig.Method = cmdConfig.Method[:len(cmdConfig.Method)-5]
+		cmdConfig.Auth = true
+	}
 
 	exists, err := ss.IsFileExists(configFile)
 	// If no config file in current directory, try search it in the binary directory
