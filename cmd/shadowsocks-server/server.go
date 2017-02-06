@@ -21,19 +21,17 @@ import (
 )
 
 import (
+	"encoding/json"
+	"html/template"
+	"io/ioutil"
+	"math/rand"
+	"net/http"
+	"time"
+
 	"github.com/codegangsta/negroni"
-	//"github.com/phyber/negroni-gzip/gzip"
 	"github.com/goincremental/negroni-sessions"
 	"github.com/goincremental/negroni-sessions/cookiestore"
-	"net/http"
-	"encoding/json"
-	
-    "math/rand"
-	"io/ioutil"
-	"time"
-	"html/template"
 )
-
 
 var debug ss.DebugLog
 
@@ -53,7 +51,6 @@ const (
 	lenHmacSha1 = 10
 )
 
-var debug ss.DebugLog
 var udp bool
 
 func getRequest(conn *ss.Conn, auth bool) (host string, ota bool, err error) {
@@ -185,15 +182,12 @@ func handleConnection(conn *ss.Conn, auth bool) {
 	if debug {
 		debug.Printf("piping %s<->%s ota=%v connOta=%v", conn.RemoteAddr(), host, ota, conn.IsOta())
 	}
-<<<<<<< HEAD
-	go ss.PipeThenClose(conn, remote)
-=======
+
 	if ota {
 		go ss.PipeThenCloseOta(conn, remote)
 	} else {
 		go ss.PipeThenClose(conn, remote)
 	}
->>>>>>> 5c6f652e323ffe46b8b417408cd519fc15a11e70
 	ss.PipeThenClose(remote, conn)
 	closed = true
 	return
@@ -330,15 +324,11 @@ func waitSignal() {
 	}
 }
 
-<<<<<<< HEAD
-func run(port, password string) {
-	
+func run(port, password string, auth bool) {
+
 	var addr string
 	var lastTime int64
-	
-=======
-func run(port, password string, auth bool) {
->>>>>>> 5c6f652e323ffe46b8b417408cd519fc15a11e70
+
 	ln, err := net.Listen("tcp", ":"+port)
 	if err != nil {
 		log.Printf("error listening port %v: %v\n", port, err)
@@ -354,7 +344,7 @@ func run(port, password string, auth bool) {
 			debug.Printf("accept error: %v\n", err)
 			return
 		}
-		
+
 		newaddr := conn.RemoteAddr().String()
 		nowtime := time.Now().Unix()
 		if addr != newaddr && lastTime >= nowtime {
@@ -363,7 +353,7 @@ func run(port, password string, auth bool) {
 		}
 		lastTime = nowtime
 		addr = newaddr
-		
+
 		// Creating cipher upon first connection.
 		if cipher == nil {
 			log.Println("creating cipher for port:", port)
@@ -484,33 +474,32 @@ func main() {
 	if core > 0 {
 		runtime.GOMAXPROCS(core)
 	}
-	
+
 	initPortMap()
-	if runtime.GOOS == "linux"  {
+	if runtime.GOOS == "linux" {
 		limitConfig.Init("/etc/limit.json")
 	} else {
 		limitConfig.Init("limit.json")
 	}
-	
-	
+
 	for port, password := range config.PortPassword {
 		go run(port, password, config.Auth)
 		if udp {
 			go runUDP(port, password, config.Auth)
 		}
 	}
-	
+
 	go runWeb()
 	go DaysLimitLoop()
 
 	waitSignal()
 }
 
-func atoi(s interface{}) int{
-	v,ok := s.(string)
+func atoi(s interface{}) int {
+	v, ok := s.(string)
 	if ok == false {
 		return 0
-    }
+	}
 	i, err := strconv.Atoi(v)
 	if err != nil {
 		return 0
@@ -518,8 +507,8 @@ func atoi(s interface{}) int{
 	return i
 }
 
-func SaveStruct(i interface{},path string) (err error) {
-	b,err := json.Marshal(i)
+func SaveStruct(i interface{}, path string) (err error) {
+	b, err := json.Marshal(i)
 	if err == nil {
 		err = ioutil.WriteFile(path, b, 0644)
 	}
@@ -529,19 +518,20 @@ func SaveStruct(i interface{},path string) (err error) {
 
 var portMap struct {
 	sync.Mutex
-	ports [1000]bool
+	ports  [1000]bool
 	config *ss.Config
 }
+
 func initPortMap() {
 	portMap.Lock()
 	conf, err := ss.ParseConfig(configFile)
 	if err == nil {
-		
+
 		if conf.ServerPort >= 8000 && conf.ServerPort <= 9000 {
 			portMap.ports[conf.ServerPort-8000] = true
 		}
-		
-		for portstr,_ := range conf.PortPassword {
+
+		for portstr, _ := range conf.PortPassword {
 			port := atoi(portstr)
 			if port >= 8000 && port <= 9000 {
 				portMap.ports[port-8000] = true
@@ -555,16 +545,16 @@ func initPortMap() {
 	checkErr(err)
 }
 
-func getPort() (port int,password string, err error) {
+func getPort() (port int, password string, err error) {
 	portMap.Lock()
-	for i,val := range portMap.ports {
+	for i, val := range portMap.ports {
 		if val == false {
 			portMap.ports[i] = true
-			port = 8000+i
+			port = 8000 + i
 			break
 		}
 	}
-	
+
 	if port != 0 {
 		password = RandSeq(8)
 		if portMap.config.PortPassword == nil {
@@ -579,9 +569,9 @@ func getPort() (port int,password string, err error) {
 	} else {
 		err = errors.New("getPort error: no spare ports")
 	}
-	
+
 	portMap.Unlock()
-	
+
 	return
 }
 
@@ -596,33 +586,34 @@ func freePort(port int) (err error) {
 	}
 	portMap.Unlock()
 	passwdManager.del(strconv.Itoa(port))
-	
+
 	return
 }
 
 type PortConfig struct {
-	EndDate string
-	Conn int
-	LimitIP int `json:"limit_ip"`
+	EndDate  string
+	Conn     int
+	LimitIP  int `json:"limit_ip"`
 	Password string
-	Port int
+	Port     int
 }
 
 type LimitConfig struct {
 	sync.Mutex
-	Password   string      `json:"password"`
+	Password string `json:"password"`
 	// following options are only used by server
 	PortLimit map[string]*PortConfig `json:"port_limit"`
-	filename string
+	filename  string
 }
 
-var limitConfig = &LimitConfig{PortLimit:make(map[string]*PortConfig),filename:"limit.json"}
+var limitConfig = &LimitConfig{PortLimit: make(map[string]*PortConfig), filename: "limit.json"}
+
 func (c *LimitConfig) Init(file string) {
-	
+
 	c.Lock()
-	
+
 	c.filename = file
-	
+
 	b, err := ioutil.ReadFile(file)
 	if err == nil {
 		json.Unmarshal(b, c)
@@ -631,7 +622,7 @@ func (c *LimitConfig) Init(file string) {
 		}
 	}
 	c.Unlock()
-	
+
 	checkErr(err)
 }
 
@@ -646,11 +637,11 @@ func (c *LimitConfig) Save() error {
 }
 
 func (c *LimitConfig) Del(port string, save bool) error {
-	
+
 	var err error
-	
+
 	c.Lock()
-	_,ok := c.PortLimit[port]
+	_, ok := c.PortLimit[port]
 	if ok == true {
 		delete(c.PortLimit, port)
 		if save == true {
@@ -660,54 +651,54 @@ func (c *LimitConfig) Del(port string, save bool) error {
 		err = errors.New("port not exist")
 	}
 	c.Unlock()
-	
+
 	checkErr(freePort(atoi(port)))
-	
+
 	return err
-	
+
 }
 
 func (c *LimitConfig) Add(days int, conn int) (*PortConfig, error) {
-	port,password,err := getPort()
+	port, password, err := getPort()
 	if port == 0 {
-		return nil,err
+		return nil, err
 	}
-	y,m,d := time.Unix(time.Now().Unix()+int64(days)*24*3600, 0).Date()
+	y, m, d := time.Unix(time.Now().Unix()+int64(days)*24*3600, 0).Date()
 	dateStr := fmt.Sprintf("%d-%d-%d", y, m, d)
-	pcon := &PortConfig{EndDate:dateStr, Conn:conn, Password:password, Port:port}
-	
+	pcon := &PortConfig{EndDate: dateStr, Conn: conn, Password: password, Port: port}
+
 	c.Lock()
 	c.PortLimit[strconv.Itoa(port)] = pcon
-	b,err := json.Marshal(c)
+	b, err := json.Marshal(c)
 	if err == nil {
 		err = ioutil.WriteFile(c.filename, b, 0644)
 	}
 	c.Unlock()
-	
+
 	checkErr(err)
-	
+
 	if err == nil {
-		go run(strconv.Itoa(port), password)
-		return pcon,nil
+		go run(strconv.Itoa(port), password, false)
+		return pcon, nil
 	} else {
-		return nil,err
+		return nil, err
 	}
-	
+
 }
 
 func runWeb() {
-	
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/config", HandleConfig)
 	mux.HandleFunc("/", HandleLogin)
-	
+
 	n := negroni.Classic()
 	store := cookiestore.New([]byte("ss"))
 	n.Use(sessions.Sessions("shadow", store))
 	//n.Use(gzip.Gzip(gzip.DefaultCompression))
 	n.UseHandler(mux)
 	n.Run(":3000")
-	
+
 }
 
 func RenderLogin(w http.ResponseWriter, param map[string]interface{}) {
@@ -727,76 +718,76 @@ func RenderLogin(w http.ResponseWriter, param map[string]interface{}) {
 }
 
 func HandleLogin(w http.ResponseWriter, req *http.Request) {
-	
+
 	if req.URL.Path != "/" {
-        http.NotFound(w,req)
+		http.NotFound(w, req)
 		return
-    }
-	
+	}
+
 	param := make(map[string]interface{})
 	req.ParseForm()
 	password, _ := req.Form["pwd"]
-	
+
 	limitConfig.Lock()
 	pwd := limitConfig.Password
 	limitConfig.Unlock()
-	
+
 	if password == nil {
-		
+
 		if pwd == "" {
 			param["btn_val"] = "设置"
 		} else {
 			param["btn_val"] = "登录"
 		}
-		
+
 	} else {
 		pwd_in := password[0]
 		if pwd == "" {
-			
+
 			if pwd_in != "" {
 				limitConfig.Lock()
 				limitConfig.Password = pwd_in
 				limitConfig.Save()
 				limitConfig.Unlock()
-				
+
 				pwdl := len(pwd)
 				pwds := pwd
 				if pwdl > 1 {
-					pwds = pwd[0:pwdl/2]
+					pwds = pwd[0 : pwdl/2]
 				}
 				session := sessions.GetSession(req)
 				session.Set("pwd", pwds)
-				
+
 				http.Redirect(w, req, "/config", http.StatusFound)
 				return
-				
+
 			} else {
 				param["btn_val"] = "设置"
 				param["pwd_empty"] = true
 			}
-			
+
 		} else if pwd == pwd_in {
-			
+
 			pwdl := len(pwd)
 			pwds := pwd
 			if pwdl > 1 {
-				pwds = pwd[0:pwdl/2]
+				pwds = pwd[0 : pwdl/2]
 			}
 			session := sessions.GetSession(req)
 			session.Set("pwd", pwds)
-			
+
 			http.Redirect(w, req, "/config", http.StatusFound)
-			
+
 			return
-			
+
 		} else {
 			param["pwd_err"] = true
 		}
-		
+
 	}
-	
+
 	RenderLogin(w, param)
-	
+
 }
 
 func RenderConfig(w http.ResponseWriter, param map[string]interface{}) {
@@ -817,121 +808,118 @@ func RenderConfig(w http.ResponseWriter, param map[string]interface{}) {
 }
 
 func HandleConfig(w http.ResponseWriter, req *http.Request) {
-	
+
 	{
 		session := sessions.GetSession(req)
 		pwdi := session.Get("pwd")
 		if pwdi != nil {
 			pwd_in := pwdi.(string)
-			
+
 			limitConfig.Lock()
 			pwd := limitConfig.Password
 			limitConfig.Unlock()
-			
+
 			if pwd != "" {
 				pwdl := len(pwd)
 				pwds := pwd
 				if pwdl > 1 {
-					pwds = pwd[0:pwdl/2]
+					pwds = pwd[0 : pwdl/2]
 				}
 				if pwds == pwd_in {
 					goto session_ok
 				}
 			}
-			
+
 		}
-		
+
 		http.Redirect(w, req, "/", http.StatusFound)
 		return
 	}
 
 session_ok:
-	
+
 	if req.Method == "GET" {
-		
+
 		RenderConfig(w, nil)
-		
+
 	} else {
-		
+
 		param := make(map[string]interface{})
 		req.ParseForm()
-		
+
 		days, _ := req.Form["days"]
 		if days != nil {
-			
-			pcon,err := limitConfig.Add(atoi(days[0]), 0)
+
+			pcon, err := limitConfig.Add(atoi(days[0]), 0)
 			if err == nil {
-				
+
 				param["add_suc"] = pcon
-				
+
 			} else {
 				param["add_err"] = err
 			}
 		} else {
 			//param["add_err"] = "请输入使用多少天"
 		}
-		
-		
+
 		port, _ := req.Form["port"]
 		if port != nil {
-			
+
 			err := limitConfig.Del(port[0], true)
 			if err == nil {
 				param["del_suc"] = "删除成功"
-				
+
 			} else {
 				param["del_err"] = err
 			}
 		} else {
 			//param["del_err"] = "请输入要删除的端口"
 		}
-		
+
 		RenderConfig(w, param)
-			
+
 	}
-	
+
 }
 
 var letters = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
 func RandSeq(n int) string {
-    b := make([]rune, n)
+	b := make([]rune, n)
 	now := time.Now().Unix()
-    for i := range b {
-        b[i] = letters[rand.Int63n(now)%int64(len(letters))]
-    }
-    return string(b)
+	for i := range b {
+		b[i] = letters[rand.Int63n(now)%int64(len(letters))]
+	}
+	return string(b)
 }
 
 func DaysLimitLoop() {
-	
-	_,_,day := time.Now().Date()
+
+	_, _, day := time.Now().Date()
 	for {
-		
+
 		nowtime := time.Now()
-		_,_,daynew := nowtime.Date()
+		_, _, daynew := nowtime.Date()
 		if daynew != day {
 			day = daynew
-			
+
 			limitConfig.Lock()
-			for k,v := range limitConfig.PortLimit {
+			for k, v := range limitConfig.PortLimit {
 				if v.EndDate != "" {
-					var y,m,d int
+					var y, m, d int
 					fmt.Sscanf(v.EndDate, "%d-%d-%d", &y, &m, &d)
 					endDateTime := time.Date(y, time.Month(m), d, 0, 0, 0, 0, nil)
-					
+
 					if nowtime.Unix() > endDateTime.Unix()+3600*24 {
-						checkErr(limitConfig.Del(k,false))
+						checkErr(limitConfig.Del(k, false))
 					}
-					
+
 				}
 			}
 			limitConfig.Save()
 			limitConfig.Unlock()
 		}
-		time.Sleep(20*time.Minute)
+		time.Sleep(20 * time.Minute)
 	}
-	
+
 }
-
-
