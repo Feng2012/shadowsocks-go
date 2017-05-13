@@ -4,3 +4,5 @@ limit.json
 debug
 .DS_Store
 .vscode
+script/http
+bin
