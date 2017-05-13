@@ -1,14 +1,26 @@
 
-### 这个版本添加了自动账号管理和限制ip等功能，使得每个人都可以开始售卖ss账号
+# 本版本说明
 
+* 提供一个web端，可以直接通过web端来添加和删除账号(输入使用天数即可添加账号)。
+* 到期账号自动失效。
+* 限制多ip用同一个账号。
+* 支持http代理(与ss的端口相同)。
+
+web端口用参数配置，默认3000：
 ```
-新功能：
-1. 提供一个web端(http://你的ip:3000)，可以直接通过web端来添加和删除账号(输入使用天数即可添加账号)
-2. 到期账号自动失效
-3. 限制多ip用同一个账号
+ssserver -web 5000
 ```
 
-已经build好的版本，包含win和linux：[链接](http://files.cnblogs.com/files/dearplain/shadowsocks.zip)
+## http代理在命令行的使用例子
+
+linux,mac:
+```
+export ALL_PROXY=http://127.0.0.1:shadowsocks本地端口
+```
+windows:
+```
+set ALL_PROXY=http://127.0.0.1:shadowsocks本地端口
+```
 
 # shadowsocks-go
 

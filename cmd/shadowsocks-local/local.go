@@ -9,7 +9,6 @@ import (
 	"log"
 	"math/rand"
 	"net"
-	"net/url"
 	"os"
 	"path"
 	"strconv"
@@ -43,8 +42,8 @@ func init() {
 func getHttpRequest(buf []byte) (rawaddr []byte, host string, toWrite []byte, err error) {
 	if buf[0] == 'C' {
 		sbuf := string(buf)
-		ss := strings.Split(sbuf, " ")
-		hp := strings.Split(ss[1], ":")
+		ss := strings.Split(sbuf, " ")  // CONNECT host:port
+		hp := strings.Split(ss[1], ":") // [host, port]
 		if debug {
 			log.Println(hp)
 		}
@@ -52,35 +51,19 @@ func getHttpRequest(buf []byte) (rawaddr []byte, host string, toWrite []byte, er
 			err = errHttpFormat
 			return
 		}
+		// [3, len(host), host]
 		rawaddr = []byte{3, byte(len(hp[0]))}
 		rawaddr = append(rawaddr, []byte(hp[0])...)
+		// port
+		var b [2]byte
 		i, _ := strconv.Atoi(hp[1])
-		var b = make([]byte, 2)
 		binary.BigEndian.PutUint16(b[:], uint16(i))
 		rawaddr = append(rawaddr, b[:]...)
+
 		host = ss[1]
 		if debug {
 			log.Println(rawaddr)
 		}
-	} else if buf[0] == 'G' {
-		sbuf := string(buf)
-		firstLine := sbuf[:strings.Index(sbuf, "\r")]
-		reqs := strings.Split(firstLine, " ")
-		httpHost := reqs[1]
-
-		var up *url.URL
-		if up, err = url.Parse(httpHost); err != nil {
-			return
-		}
-		getReq := up.Path
-		newReq := strings.Replace(sbuf, httpHost, getReq, 1)
-		newReq = strings.Replace(newReq, "Proxy-Connection: keep-alive\r\n", "", 1)
-		toWrite = []byte(newReq)
-		host = up.Host
-		rawaddr = []byte{3, byte(len(up.Host))}
-		rawaddr = append(rawaddr, []byte(up.Host)...)
-		rawaddr = append(rawaddr, 0, 80)
-
 	} else {
 		err = errHttpFormat
 		return
@@ -451,7 +434,7 @@ func handleConnection(conn net.Conn) {
 			log.Println("error getting http request:", err)
 			return
 		}
-		writeBack = []byte("HTTP/1.0 200 Connection established\r\nProxy-agent: SS-Proxy/1.1\r\n\r\n")
+		writeBack = []byte("HTTP/1.0 200 Connection established\r\nProxy-agent: Shadowsocks/1.1\r\n\r\n")
 	} else {
 		if err = handSocksShakeByte(buf[:n], conn); err != nil {
 			log.Println("socks handshake:", err)

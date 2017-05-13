@@ -1,1 +1,6 @@
 *.deb
+config.json
+limit.json
+debug
+.DS_Store
+.vscode
