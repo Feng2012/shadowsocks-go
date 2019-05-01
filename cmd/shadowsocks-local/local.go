@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"net/url"
 	"os"
 	"path"
 	"strconv"
@@ -39,7 +40,7 @@ func init() {
 	rand.Seed(time.Now().Unix())
 }
 
-func getHttpRequest(buf []byte) (rawaddr []byte, host string, toWrite []byte, err error) {
+func getHttpRequest(buf []byte) (rawaddr []byte, host string, toWrite, writeBack []byte, err error) {
 	if buf[0] == 'C' {
 		sbuf := string(buf)
 		ss := strings.Split(sbuf, " ")  // CONNECT host:port
@@ -64,10 +65,51 @@ func getHttpRequest(buf []byte) (rawaddr []byte, host string, toWrite []byte, er
 		if debug {
 			log.Println(rawaddr)
 		}
+		writeBack = []byte("HTTP/1.0 200 Connection established\r\nProxy-agent: Shadowsocks/1.1\r\n\r\n")
+	} else if buf[0] == 'G' {
+		sbuf := string(buf)
+		if debug {
+			log.Println(sbuf)
+		}
+		// [3, len(host), host, port]
+		ss := strings.Split(sbuf, " ")
+		u, err2 := url.Parse(ss[1])
+		if err2 != nil {
+			err = err2
+			return
+		}
+		host = u.Host
+		rawaddr = []byte{3, byte(len(u.Host))}
+		rawaddr = append(rawaddr, []byte(u.Host)...)
+		var b [2]byte
+		var port int
+		if u.Port() == "" {
+			if u.Scheme == "http" {
+				port = 80
+			} else if u.Scheme == "https" {
+				port = 443
+			} else {
+				err = errHttpFormat
+				return
+			}
+		} else {
+			port, _ = strconv.Atoi(u.Port())
+		}
+		if debug {
+			log.Println(u.Scheme, u.Host, port, u.RequestURI())
+		}
+		binary.BigEndian.PutUint16(b[:], uint16(port))
+		rawaddr = append(rawaddr, b[:]...)
+		sbuf = strings.Replace(sbuf, ss[1], u.RequestURI(), 1)
+		sbuf = strings.Replace(sbuf, "Proxy-Connection: keep-alive\r\n", "", 1)
+		toWrite = []byte(sbuf)
+		if debug {
+			log.Println("toWrite:", string(toWrite))
+		}
 	} else {
 		err = errHttpFormat
-		return
 	}
+
 	return
 }
 
@@ -438,12 +480,11 @@ func handleConnection(conn net.Conn) {
 	var writeBack []byte
 	//log.Println(string(buf[:n]))
 	if buf[0] == 'C' || buf[0] == 'G' {
-		rawaddr, addr, toWrite, err = getHttpRequest(buf[:n])
+		rawaddr, addr, toWrite, writeBack, err = getHttpRequest(buf[:n])
 		if err != nil {
 			log.Println("error getting http request:", err)
 			return
 		}
-		writeBack = []byte("HTTP/1.0 200 Connection established\r\nProxy-agent: Shadowsocks/1.1\r\n\r\n")
 	} else {
 		if err = handSocksShakeByte(buf[:n], conn); err != nil {
 			log.Println("socks handshake:", err)
